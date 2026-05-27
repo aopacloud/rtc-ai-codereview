@@ -1,0 +1,10 @@
+{
+    "name": "deepseek-review",
+    "version": "1.20.0",
+    "actionVer": "v1.20",
+    "author": "hustcer",
+    "license": "MIT",
+    "github": "https://github.com/hustcer/deepseek-review",
+    "home": "https://github.com/marketplace/actions/deepseek-cr",
+    "description": "🚀 Sharpen Your Code, Ship with Confidence – Elevate Your Workflow with DeepSeek Code Review 🚀"
+}

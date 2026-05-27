@@ -1,0 +1,39 @@
+# REF:
+#   https://cspell.org/configuration/
+# Usage:
+#   npx cspell --no-progress .
+
+words:
+- psql
+- MPFR
+- nuon
+- pwsh
+- JDBC
+- mpsc
+- nuons
+- ECODE
+- vyadh
+- nutest
+- endfor
+- dotenv
+- Ollama
+- hustcer
+- Nushell
+- creatio
+- pipefail
+- justfile
+- lefthook
+- deepseek
+- linewise
+- Subshell
+- subshells
+- noreferrer
+- OPENROUTER
+- Infinigence
+- SILICONFLOW
+- USERPROFILE
+- Unsanitized
+- Unvalidated
+- monomorphization
+ignorePaths:
+- config.yml

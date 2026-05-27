@@ -1,0 +1,7 @@
+.env
+.env.dev
+.env.local
+review.md
+config.yml
+prompts.yaml
+.DS_Store
