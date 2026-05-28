@@ -43,10 +43,11 @@ def get-diff-content [
 ] {
   let local_repo = $env.PWD
 
-  if ($pr_number | is-not-empty) {
-    get-pr-diff --repo $repo $pr_number
-  } else if ($diff_from | is-not-empty) {
+  # Prefer local git diff over REST API to avoid token permission issues in private repos
+  if ($diff_from | is-not-empty) {
     get-ref-diff $diff_from --diff-to $diff_to
+  } else if ($pr_number | is-not-empty) {
+    get-pr-diff --repo $repo $pr_number
   } else if not (git-check $local_repo --check-repo=1) {
     print $'Current directory ($local_repo) is (ansi r)NOT(ansi reset) a git repo, bye...(char nl)'
     exit $ECODE.CONDITION_NOT_SATISFIED
