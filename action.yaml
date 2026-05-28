@@ -88,25 +88,35 @@ runs:
       shell: nu {0}
       env:
         WATCH_MENTION: ${{ inputs.watch-mention }}
+        SYS_PROMPT: ${{ inputs.sys-prompt }}
+        USER_PROMPT: ${{ inputs.user-prompt }}
+        CHAT_TOKEN: ${{ inputs.chat-token }}
+        GH_TOKEN: ${{ inputs.github-token }}
+        DIFF_FROM: ${{ inputs.diff-from }}
+        DIFF_TO: ${{ inputs.diff-to }}
+        MODEL: ${{ inputs.model }}
+        BASE_URL: ${{ inputs.base-url }}
+        INCLUDE_PATTERNS: ${{ inputs.include-patterns }}
+        EXCLUDE_PATTERNS: ${{ inputs.exclude-patterns }}
       run: |
         const NU_LIB_DIRS = [ ${{ github.action_path }}/nu ]
         use review.nu *
-        let model = '${{ inputs.model }}'
-        let baseUrl = '${{ inputs.base-url }}'
+        let model = $env.MODEL
+        let baseUrl = $env.BASE_URL
         let event = (open $env.GITHUB_EVENT_PATH)
         let repo = '${{ github.repository }}'
-        let token = '${{ inputs.chat-token }}'
-        let ghToken = '${{ inputs.github-token }}'
-        let sysPrompt = '${{ inputs.sys-prompt }}'
-        let userPrompt = '${{ inputs.user-prompt }}'
+        let token = $env.CHAT_TOKEN
+        let ghToken = $env.GH_TOKEN
+        let sysPrompt = $env.SYS_PROMPT
+        let userPrompt = $env.USER_PROMPT
         let pr = $event.pull_request?.number? | default $event.issue?.number? | default '' | into string
-        let includePatterns = '${{ inputs.include-patterns }}'
-        let excludePatterns = '${{ inputs.exclude-patterns }}'
+        let includePatterns = $env.INCLUDE_PATTERNS? | default ''
+        let excludePatterns = $env.EXCLUDE_PATTERNS? | default 'pnpm-lock.yaml,package-lock.json,*.lock'
         let maxLength = try { '${{ inputs.max-length }}' | into int } catch { 0 }
         let temperature = try { '${{ inputs.temperature }}' | into float } catch { 0.3 }
         let watchMention = $env.WATCH_MENTION
-        let diffFrom = '${{ inputs.diff-from }}'
-        let diffTo = '${{ inputs.diff-to }}'
+        let diffFrom = $env.DIFF_FROM
+        let diffTo = $env.DIFF_TO
         if '${{ github.event_name }}' == 'issue_comment' {
           if ($event.issue?.pull_request? | is-empty) {
             print 'Not a pull request comment, skipping.'
