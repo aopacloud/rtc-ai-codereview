@@ -299,10 +299,11 @@ def post-comments-to-pr [
 ] {
   let BASE_HEADER = [Authorization $'Bearer ($env.GH_TOKEN)' Accept application/vnd.github.v3+json ...$HTTP_HEADERS]
 
-  # 1. Post the full review as an issue comment
+  # 1. Post the full review as an issue comment (strip "二、发现问题" section)
+  let comment_body = strip-problem-section $comments
   let comment_url = $'($GITHUB_API_BASE)/repos/($repo)/issues/($pr_number)/comments'
   try {
-    http post -t application/json -H $BASE_HEADER $comment_url { body: $comments }
+    http post -t application/json -H $BASE_HEADER $comment_url { body: $comment_body }
   } catch {|err|
     print $'(ansi r)Failed to post comments to PR: (ansi reset)'
     $err | table -e | print
