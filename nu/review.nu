@@ -155,12 +155,24 @@ export def --env deepseek-review [
   let message = $response | get -o choices.0.message
   let reason = $message | coalesce-reasoning
   let review = $message.content? | default ($response | get -o message.content)
-  let result = ['<details>' '<summary> Reasoning Details</summary>' $reason "</details>\n" $review] | str join "\n"
+  # Strip inline thinking blocks (e.g. MiniMax puts <think>...</think> in content)
+  let review = $review | str replace --all --regex '(?s)<think>.*?</think>\s*' ''
+  let review = $review | str trim
   if ($review | is-empty) {
     print $'✖️ Code review failed！No review result returned from ($base_url) ...'
     exit $ECODE.SERVER_ERROR
   }
-  let result = if ($reason | is-empty) { $review } else { $result }
+  # Build diff range summary for terminal print
+  let diff_range = build-diff-range $setting
+
+  # Only include reasoning in action output (as collapsible details)
+  let result = if ($reason | is-empty) {
+    $review
+  } else if $is_action {
+    ['<details>' '<summary> Reasoning Details</summary>' $reason "</details>\n" $review] | str join "\n"
+  } else {
+    $review
+  }
 
   match $output_mode {
     'action' => {
@@ -169,6 +181,11 @@ export def --env deepseek-review [
     }
     'file' => { write-review-to-file $output $setting $result $response }
     _ => { print $'Code Review Result:'; hr-line; print $result }
+  }
+
+  # Print diff range info in terminal
+  if ($diff_range | is-not-empty) {
+    print $'(char nl)($diff_range)'
   }
 
   if ($response.usage? | is-not-empty) {
@@ -225,19 +242,125 @@ def validate-temperature [temp: float] {
 }
 
 # Post review comments to GitHub PR
+# Posts the full review as an issue comment,
+# and additionally posts inline PR review comments for each suggestion block
+# to enable the "Commit suggestion" button.
 def post-comments-to-pr [
   repo: string,        # GitHub repository name, e.g. hustcer/deepseek-review
   pr_number: string,   # GitHub PR number
   comments: string,    # Comments content to post
 ] {
-  let comment_url = $'($GITHUB_API_BASE)/repos/($repo)/issues/($pr_number)/comments'
   let BASE_HEADER = [Authorization $'Bearer ($env.GH_TOKEN)' Accept application/vnd.github.v3+json ...$HTTP_HEADERS]
+
+  # 1. Post the full review as an issue comment
+  let comment_url = $'($GITHUB_API_BASE)/repos/($repo)/issues/($pr_number)/comments'
   try {
     http post -t application/json -H $BASE_HEADER $comment_url { body: $comments }
   } catch {|err|
     print $'(ansi r)Failed to post comments to PR: (ansi reset)'
     $err | table -e | print
     exit $ECODE.SERVER_ERROR
+  }
+
+  # 2. Parse findings and post inline review comments with suggestion blocks
+  let review_comment_url = $'($GITHUB_API_BASE)/repos/($repo)/pulls/($pr_number)/comments'
+  let findings = parse-findings $comments
+  for finding in $findings {
+    try {
+      http post -t application/json -H $BASE_HEADER $review_comment_url {
+        path: $finding.path
+        line: $finding.line
+        side: 'RIGHT'
+        body: $finding.body
+      }
+      print $'  ✅ Posted review comment on ($finding.path):($finding.line)'
+    } catch {|err|
+      print $'  ⚠️ Skipped review comment on ($finding.path):($finding.line) - line may not be in diff'
+    }
+  }
+}
+
+# Parse the AI review response to extract findings with suggestion blocks
+# Each finding includes: path, line, and body (with suggestion block)
+def parse-findings [review: string] {
+  # Split by section separator ---
+  let sections = $review | split row '---' | where { $in | str trim | is-not-empty }
+
+  $sections | each {|section|
+    let trimmed = $section | str trim
+
+    # Extract file path and line number from ### [severity] `path:line`
+    # Find the heading line with `path:line` pattern (### ❗ `file/path:line` 🔴)
+    let heading_lines = $trimmed | lines | where { ($in | str starts-with '###') and ($in | str contains '`') }
+    if ($heading_lines | is-empty) { return }
+    let heading_line = $heading_lines | first
+    # Extract content between backticks
+    let file_ref = $heading_line | str replace --regex '.*?`([^`]+)`.*' '$1'
+    let parts = $file_ref | split row ':'
+    if ($parts | length) < 2 { return }
+    let path = $parts | get 0 | str trim
+    # Handle line ranges like :178-185, take first line number
+    let line_part = $parts | get 1 | split row '-' | get 0 | str trim
+    let line = try { $line_part | into int } catch { return }
+
+    # Check for suggestion block
+    let has_suggestion = ($trimmed | str contains '```suggestion')
+    if not $has_suggestion { return }
+
+    # Build the review comment body (priority + description + suggestion)
+    let body = build-review-comment-body $trimmed
+
+    { path: $path, line: $line, body: $body }
+  } | where { $in | is-not-empty }
+}
+
+# Build a concise review comment body from a finding section
+# Extracts priority label, problem description, and suggestion block
+def build-review-comment-body [section: string] {
+  let lines = $section | lines
+
+  # Find the priority label
+  let priority_line = $lines | where { $in | str contains '🔴' or $in | str contains '🟠' or $in | str contains '🟢' } | first
+  let priority = $priority_line | str replace --regex '.*?(🔴|🟠|🟢).*' '$1'
+
+  # Extract problem description
+  let desc_lines = $lines | where { $in | str contains '**问题描述：**' }
+  let desc = if ($desc_lines | is-not-empty) {
+    $desc_lines | first | str replace --regex '^.*\*\*问题描述：\*\*\s*' ''
+  } else { '' }
+
+  # Extract suggestion code
+  let suggestion_code = extract-suggestion-code $lines
+
+  # Build the comment body
+  let parts = [
+    $priority
+    ''
+    $desc
+    ''
+    '```suggestion'
+    $suggestion_code
+    '```'
+  ]
+  $parts | where { $in | is-not-empty } | str join "\n"
+}
+
+# Extract the code between ```suggestion and closing ```
+def extract-suggestion-code [lines: list] {
+  let enumerated = $lines | enumerate
+  # Find the line index of ```suggestion
+  let start_entries = $enumerated | where { $in.item | str contains '```suggestion' }
+  if ($start_entries | is-empty) { return '' }
+  let start_idx = $start_entries | get 0 | get index
+  # Find the next ``` after the start
+  let after_start = $enumerated | where { $in.index > $start_idx }
+  let end_entries = $after_start | where { $in.item | str starts-with '```' }
+  if ($end_entries | is-empty) {
+    # No closing ```, take all remaining lines
+    $lines | skip ($start_idx + 1) | str join "\n"
+  } else {
+    let end_idx = $end_entries | get 0 | get index
+    $lines | skip ($start_idx + 1) | take ($end_idx - $start_idx - 1) | str join "\n"
   }
 }
 
@@ -304,6 +427,33 @@ def parse-line [] {
 def coalesce-reasoning [] {
   let msg = $in
   $msg.reasoning_content? | default $msg.reasoning?
+}
+
+# Build diff range summary string for terminal print
+export def build-diff-range [setting: record] {
+  let from = $setting.diff_from? | default ''
+  let to = $setting.diff_to? | default ''
+  let patch = $setting.patch_cmd? | default ''
+
+  # For diff-from mode (diff_to defaults to HEAD)
+  if ($from | is-not-empty) {
+    let to_ref = if ($to | is-not-empty) { $to } else { 'HEAD' }
+    let sha_from = try { git rev-parse --short $from | str trim } catch { $from }
+    let sha_to = try { git rev-parse --short $to_ref | str trim } catch { $to_ref }
+    let ref_info = if ($from | str starts-with $sha_from) and ($to_ref | str starts-with $sha_to) {
+      ''  # Already SHAs, no need to show branch names
+    } else {
+      $' ($from)..($to_ref)'
+    }
+    return $'📐 对比范围：($sha_from) → ($sha_to)($ref_info)'
+  }
+
+  # For patch command mode (e.g. git show HEAD~1)
+  if ($patch | is-not-empty) {
+    return $'📐 对比命令：($patch)'
+  }
+
+  ''
 }
 
 alias main = deepseek-review
