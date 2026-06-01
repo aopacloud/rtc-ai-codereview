@@ -345,12 +345,12 @@ def build-review-comment-body [section: string] {
 
   # Extract severity from heading line (### ❗ or ### ⚠️ or ### 💡)
   let heading_line = $lines | where { ($in | str starts-with '###') and ($in | str contains '`') } | get -o 0
-  let severity = if ($heading_line | is-not-empty) {
-    if ($heading_line | str contains '❗') { '❗ Critical' }
-    else if ($heading_line | str contains '⚠️') { '⚠️ Warning' }
-    else if ($heading_line | str contains '💡') { '💡 Suggestion' }
-    else { '' }
-  } else { '' }
+  let severity = ''
+  if ($heading_line | is-not-empty) {
+    if ($heading_line | str contains '❗') { $severity = '❗ Critical' }
+    if ($heading_line | str contains '⚠️') { $severity = '⚠️ Warning' }
+    if ($heading_line | str contains '💡') { $severity = '💡 Suggestion' }
+  }
 
   # Extract problem description
   let desc_lines = $lines | where { $in | str contains '**问题描述：**' }
