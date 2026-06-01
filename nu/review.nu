@@ -279,7 +279,7 @@ def post-comments-to-pr [
 
   let review_comment_url = $'($GITHUB_API_BASE)/repos/($repo)/pulls/($pr_number)/comments'
   let findings = parse-findings $comments
-  print $'  📋 Parsed ($findings | length) finding(s) with suggestion blocks'
+  print $'  📋 Parsed ($findings | length) findings with suggestion blocks'
 
   for finding in $findings {
     let payload = {
