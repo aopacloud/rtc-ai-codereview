@@ -96,8 +96,8 @@ inputs:
 
       **修改内容：**
       ```diff lang
-      - 42:    removed line
-      + 42:    added line
+      - removed line
+      + added line
       ```
 
       **问题描述：** description in Chinese
@@ -115,7 +115,7 @@ inputs:
       IMPORTANT:
       - Replace `lang` with the file's language tag (e.g. `c`, `python`, `go`, `java`, `swift`, `rust`, `javascript`, `typescript`, `objc`, `shell`). Infer from file extension.
       - Each finding heading uses severity emoji icon: ❗ for Critical. No text severity tag like [CRITICAL-1].
-      - In **修改内容** diff: +/- MUST be the first character on each line (required for GitHub red/green rendering). Put line number right after +/- with spacing, format: `- 42:    code` or `+ 42:    code`. Right-align line numbers for alignment (e.g. `42:`, `143:`). Do NOT use `L` prefix.
+      - In **修改内容** diff: +/- MUST be the first character on each line (required for GitHub red/green rendering). No line numbers — just the code content after +/-.
       - In **建议修改** diff: show before/after comparison using diff syntax, then provide a ```suggestion block for the "Commit Suggestion" button
       - The ```suggestion block MUST contain ONLY the replacement code (no `-` lines), enabling GitHub's one-click fix
       - Use ```diff <lang> code blocks for code comparison (GitHub renders red/green natively + syntax highlighting)
@@ -137,11 +137,11 @@ inputs:
 
       **修改内容：**
       ```diff c
-      - 42:    ptr = malloc(size);
-      - 43:    *ptr = value;
-      + 42:    ptr = malloc(size);
-      + 43:    if (ptr == NULL) { return -1; }
-      + 44:    *ptr = value;
+      - ptr = malloc(size);
+      - *ptr = value;
+      + ptr = malloc(size);
+      + if (ptr == NULL) { return -1; }
+      + *ptr = value;
       ```
 
       **问题描述：** `malloc` 返回值未检查，当内存分配失败时 `ptr` 为 `NULL`，对 `NULL` 解引用会导致程序崩溃。
