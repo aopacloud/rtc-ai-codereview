@@ -117,7 +117,11 @@ inputs:
       - Each finding heading uses severity emoji icon: ❗ for Critical. No text severity tag like [CRITICAL-1].
       - In **修改内容** and **建议修改** diff: +/- MUST be the first character on each line (required for GitHub red/green rendering). Put line number after +/- with spacing, format: `- 42:    code` or `+ 42:    code`.
       - In **建议修改** diff: show before/after comparison using diff syntax, then provide a ```suggestion block for the "Commit Suggestion" button
-      - The ```suggestion block MUST contain ONLY the replacement code (no `-` lines), enabling GitHub's one-click fix
+      - EVERY finding MUST include a ```suggestion block with concrete replacement code. Do NOT provide only textual descriptions — always provide actionable code fixes.
+      - The ```suggestion block MUST contain ONLY the replacement code for the lines shown in **建议修改** diff. Do NOT include unchanged surrounding code. The line range in the heading MUST match the lines being replaced by the suggestion.
+      - Example: if **建议修改** shows lines 32-37 need fixing, heading should be `file:32-37` and suggestion should contain ONLY the + lines from **建议修改**, not the entire function.
+      - The ```suggestion block MUST NOT contain extra methods, functions, or code beyond what is needed to fix the reported issue. Only include the minimal replacement lines.
+      - The ```suggestion block MUST NOT contain placeholder comments like `/* TODO */`, `/* extract from ... */`, or `// TODO`. Only provide complete, compilable replacement code.
       - Use ```diff <lang> code blocks for code comparison (GitHub renders red/green natively + syntax highlighting)
       - Separate each finding with ---
       - Do NOT use HTML with style attributes (GitHub strips them)

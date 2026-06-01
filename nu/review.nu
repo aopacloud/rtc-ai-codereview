@@ -193,6 +193,7 @@ export def --env deepseek-review [
 }
 
 # Write the code review result to a file
+# Also saves suggestion payloads as JSON for local debugging
 def write-review-to-file [
   file: string,           # Output file path
   setting: record,        # Review settings
@@ -217,6 +218,41 @@ def write-review-to-file [
   } catch {|err|
     print $'(ansi r)Failed to save review result: (ansi reset)'
     $err | table -e | print
+  }
+
+  # Parse findings and save suggestion payloads as JSON for debugging
+  let findings = parse-findings $result
+  if ($findings | is-not-empty) {
+    let payloads = $findings | each {|f|
+      let sug = $f.body | str replace --regex '(?s).*```suggestion\s*' '' | str replace --regex '```.*' '' | str trim
+      {
+        path: $f.path
+        start_line: $f.start_line
+        line: $f.line
+        side: 'RIGHT'
+        body: $f.body
+        _debug: {
+          ai_line_range: $'($f.start_line)-($f.line)'
+          extracted_suggestion: $sug
+          suggestion_lines: ($sug | lines | length)
+        }
+      }
+    }
+    let json_file = $file | str replace '.md' '.suggestions.json'
+    try {
+      $payloads | to json -i 2 | save --force $json_file
+      print $'Suggestion payloads saved to (ansi g)($json_file)(ansi reset)'
+      # Print each payload for quick comparison
+      for p in $payloads {
+        print $'  📤 ($p.path):($p.start_line)-($p.line)'
+        print $'     suggestion:'
+        print $p._debug.extracted_suggestion
+        print ''
+      }
+    } catch {|err|
+      print $'(ansi r)Failed to save suggestion payloads: (ansi reset)'
+      $err | table -e | print
+    }
   }
 }
 
@@ -298,55 +334,73 @@ def post-comments-to-pr [
   print $'  📋 Fetched diff info for ($diff_hunks | length) files'
 
   for finding in $findings {
-    # Validate the line number using diff info
-    let line = validate-line-in-diff $finding $diff_hunks
-    # If line was adjusted, skip this finding — suggestion content won't match the adjusted line
-    if $line != $finding.line {
-      print $'  ⚠️ Skipped review comment on ($finding.path):($finding.line) - line adjusted to ($line), suggestion content may not match'
+    # For findings WITH suggestion, find correct line range by matching content in diff
+    # For findings WITHOUT suggestion, use AI-reported line numbers directly
+    let line_range = if $finding.has_suggestion {
+      find-line-by-content $finding $diff_hunks
     } else {
-      let payload = {
+      { start_line: $finding.start_line, end_line: $finding.line }
+    }
+    let start_line = $line_range.start_line
+    let end_line = $line_range.end_line
+
+    # Build payload with start_line for multi-line comments
+    let payload = if $start_line != $end_line {
+      {
         path: $finding.path
-        line: $line
+        start_line: $start_line
+        line: $end_line
         side: 'RIGHT'
         body: $finding.body
       }
-      # Include commit_id if available for accurate diff positioning
-      let payload = if ($commit_id | is-not-empty) {
-        $payload | merge { commit_id: $commit_id }
-      } else {
-        $payload
+    } else {
+      {
+        path: $finding.path
+        line: $end_line
+        side: 'RIGHT'
+        body: $finding.body
       }
-      try {
-        # Debug: print the payload being submitted
-        print $'  📤 Review comment payload:'
-        print $'     path: ($payload.path)'
-        print $'     line: ($payload.line)'
-        print $'     side: ($payload.side)'
-        print $'     commit_id: ($commit_id)'
-        print $'     body:'
-        print $payload.body
-        http post -t application/json -H $BASE_HEADER $review_comment_url $payload
-        print $'  ✅ Posted review comment on ($finding.path):($finding.line)'
-      } catch {|err|
-        let err_msg = try { $err.msg? | default '' } catch { '' }
-        let err_detail = if ($err_msg | is-not-empty) { $err_msg } else { try { $err | str substring 0..<200 } catch { $'($err)' } }
-        print $'  ⚠️ Skipped review comment on ($finding.path):($finding.line) - ($err_detail)'
+    }
+    # Include commit_id if available for accurate diff positioning
+    let payload = if ($commit_id | is-not-empty) {
+      $payload | merge { commit_id: $commit_id }
+    } else {
+      $payload
+    }
+    try {
+      # Debug: print the payload being submitted
+      let sug_tag = if $finding.has_suggestion { 'suggestion' } else { 'comment-only' }
+      print $'  📤 Review comment payload [($sug_tag)]:'
+      print $'     path: ($payload.path)'
+      print $'     line: ($payload.line)'
+      if ($payload | get -o start_line | is-not-empty) {
+        print $'     start_line: ($payload.start_line)'
       }
+      print $'     side: ($payload.side)'
+      print $'     commit_id: ($commit_id)'
+      print $'     body:'
+      print $payload.body
+      http post -t application/json -H $BASE_HEADER $review_comment_url $payload
+      print $'  ✅ Posted review comment on ($finding.path):($start_line)-($end_line) [($sug_tag)]'
+    } catch {|err|
+      let err_msg = try { $err.msg? | default '' } catch { '' }
+      let err_detail = if ($err_msg | is-not-empty) { $err_msg } else { try { $err | str substring 0..<200 } catch { $'($err)' } }
+      print $'  ⚠️ Skipped review comment on ($finding.path):($start_line)-($end_line) - ($err_detail)'
     }
   }
 }
 
 # Parse the AI review response to extract findings with suggestion blocks
-# Each finding includes: path, line, and body (with suggestion block)
-def parse-findings [review: string] {
+# Each finding includes: path, start_line, line, and body (with suggestion block)
+# Line range is extracted from **建议修改** diff for accuracy
+export def parse-findings [review: string] {
   # Split by section separator ---
   let sections = $review | split row '---' | where { $in | str trim | is-not-empty }
 
   $sections | each {|section|
     let trimmed = $section | str trim
 
-    # Extract file path and line number from ### [severity] `path:line`
-    # Find the heading line with `path:line` pattern (### ❗ `file/path:line` 🔴)
+    # Extract file path from ### [severity] `path:line`
     let heading_lines = $trimmed | lines | where { ($in | str starts-with '###') and ($in | str contains '`') }
     if ($heading_lines | is-empty) { return }
     let heading_line = $heading_lines | first
@@ -355,64 +409,184 @@ def parse-findings [review: string] {
     let parts = $file_ref | split row ':'
     if ($parts | length) < 2 { return }
     let path = $parts | get 0 | str trim
-    # Handle line ranges like :178-185, take first line number
-    let line_part = $parts | get 1 | split row '-' | get 0 | str trim
-    let line = try { $line_part | into int } catch { return }
+
+    # Get the line range from the heading
+    let line_parts = $parts | get 1 | split row '-'
+    let start_line = try { $line_parts | get 0 | str trim | into int } catch { return }
+    let end_line = try { $line_parts | get 1 | str trim | into int } catch { $start_line }
 
     # Check for suggestion block
     let has_suggestion = ($trimmed | str contains '```suggestion')
-    if not $has_suggestion { return }
 
-    # Build the review comment body (priority + description + suggestion)
-    let body = build-review-comment-body $trimmed
-
-    { path: $path, line: $line, body: $body }
+    if $has_suggestion {
+      # Calculate end_line from suggestion content line count
+      let suggestion_lines = extract-suggestion-lines $trimmed
+      let sug_line_count = $suggestion_lines | length
+      let end_line = $start_line + $sug_line_count - 1
+      # Build the review comment body (priority + description + suggestion)
+      let body = build-review-comment-body $trimmed
+      { path: $path, start_line: $start_line, line: $end_line, body: $body, has_suggestion: true }
+    } else {
+      # No suggestion block — still report as review comment with description only
+      let body = build-review-comment-body-no-suggestion $trimmed
+      { path: $path, start_line: $start_line, line: $end_line, body: $body, has_suggestion: false }
+    }
   } | where { $in | is-not-empty }
 }
 
-# Validate and fix the line number for a finding using the PR diff patch
-# GitHub Review Comment API requires the line to exist in the diff (RIGHT side)
-# If the AI-reported line is a deleted line, find the nearest valid line in the diff
- def validate-line-in-diff [finding: record, diff_hunks: list] {
+# Extract the raw lines from the ```suggestion block
+# Returns a list of code lines (without the suggestion markers)
+export def extract-suggestion-lines [section: string] {
+  let lines = $section | lines
+  let sug_start = try { $lines | enumerate | where { $in.item | str starts-with '```suggestion' } | get 0 | get index } catch { -1 }
+  if $sug_start < 0 { return [] }
+  # Find the closing ```
+  let after_start = $lines | skip ($sug_start + 1) | enumerate
+  let sug_end = try { $after_start | where { $in.item | str starts-with '```' } | get 0 | get index } catch { -1 }
+  if $sug_end < 0 { return [] }
+  # Extract lines between ```suggestion and ```
+  $lines | skip ($sug_start + 1) | take $sug_end
+}
+
+# Extract the precise line range from the **建议修改** diff section
+# Returns the start and end line numbers of the + lines in the diff
+# NOTE: This function is kept for reference but no longer used in parse-findings
+export def extract-suggest-line-range [section: string] {
+  let lines = $section | lines
+  # Find the **建议修改：** marker
+  let suggest_idx = try { $lines | enumerate | where { $in.item | str contains '**建议修改：**' } | get 0 | get index } catch { -1 }
+  if $suggest_idx < 0 { return { start: 0, end: 0 } }
+
+  # Find the diff code block after **建议修改：**
+  # Look for lines like + 32:    code or + 33:    code to get the replacement line range
+  let after_marker = $lines | skip ($suggest_idx + 1)
+  let plus_lines = $after_marker | where { $in | str starts-with '+' } | where { $in | str contains ':' }
+
+  if ($plus_lines | is-empty) { return { start: 0, end: 0 } }
+
+  # Extract line numbers from + N:    code format
+  let line_nums = $plus_lines | each {|line|
+    let match = $line | str replace --regex '^\+\s*(\d+):.*' '$1'
+    try { $match | into int } catch { 0 }
+  } | where { $in > 0 }
+
+  if ($line_nums | is-empty) { return { start: 0, end: 0 } }
+
+  let start = $line_nums | math min
+  let end = $line_nums | math max
+  { start: $start, end: $end }
+}
+
+# Find the correct line range for a finding by searching suggestion content in the PR diff
+# This is more reliable than trusting the AI-reported line numbers
+# Returns { start_line, end_line } with corrected values, or the original if no match found
+def find-line-by-content [finding: record, diff_hunks: list] {
   let path = $finding.path
-  let reported_line = $finding.line
+  let ai_start = $finding.start_line
+  let ai_end = $finding.line
+
+  # Extract suggestion code lines
+  let sug_lines = extract-suggestion-lines $finding.body
+  if ($sug_lines | is-empty) {
+    print $'    ℹ️ No suggestion content in ($path), using AI lines ($ai_start)-($ai_end)'
+    return { start_line: $ai_start, end_line: $ai_end }
+  }
 
   # Find the matching file in diff
   let file_info = $diff_hunks | where { $in.path == $path } | get -o 0
   if ($file_info | is-empty) {
-    print $'    ℹ️ ($path) not found in diff, using reported line ($reported_line)'
-    return $reported_line
+    print $'    ℹ️ ($path) not found in diff, using AI lines ($ai_start)-($ai_end)'
+    return { start_line: $ai_start, end_line: $ai_end }
   }
   let patch = $file_info.patch
   if ($patch | is-empty) {
-    print $'    ℹ️ No patch for ($path), using reported line ($reported_line)'
-    return $reported_line
+    print $'    ℹ️ No patch for ($path), using AI lines ($ai_start)-($ai_end)'
+    return { start_line: $ai_start, end_line: $ai_end }
   }
 
-  # Parse @@ -old_start,count +new_start,count @@ to build line mapping
-  # Collect all valid RIGHT-side line numbers from the patch
-  let valid_lines = parse-diff-valid-lines $patch
-  if ($valid_lines | is-empty) {
-    print $'    ℹ️ Could not parse patch for ($path), using reported line ($reported_line)'
-    return $reported_line
+  # Parse the diff to build line-number → content mapping for RIGHT side
+  let line_map = parse-diff-line-map $patch
+  if ($line_map | is-empty) {
+    print $'    ℹ️ Could not parse patch for ($path), using AI lines ($ai_start)-($ai_end)'
+    return { start_line: $ai_start, end_line: $ai_end }
   }
 
-  # Check if reported line is valid
-  let is_valid = $valid_lines | where { $in == $reported_line } | length
-  if $is_valid > 0 {
-    return $reported_line
+  # Use the first line of suggestion to find the start position
+  # Normalize both sides: strip leading whitespace for fuzzy matching
+  let first_sug = $sug_lines | get 0 | str trim
+  let sug_line_count = $sug_lines | length
+
+  # Search for the first suggestion line in the diff content
+  let matches = $line_map | where { $in.content | str trim | str contains $first_sug }
+
+  if ($matches | is-empty) {
+    # Try a more lenient search: use a shorter substring
+    let short_key = if ($first_sug | str length) > 30 {
+      $first_sug | str substring 0..<30
+    } else { $first_sug }
+    let lenient_matches = $line_map | where { $in.content | str trim | str contains $short_key }
+    if ($lenient_matches | is-empty) {
+      print $'    ⚠️ ($path): suggestion content not found in diff, using AI lines ($ai_start)-($ai_end)'
+      return { start_line: $ai_start, end_line: $ai_end }
+    }
+    # Use the match closest to AI-reported line
+    let best = $lenient_matches | sort-by line | where { $in.line >= $ai_start } | get -o 0
+    let best = if ($best | is-not-empty) { $best } else { $lenient_matches | last }
+    let found_start = $best.line
+    let found_end = $found_start + $sug_line_count - 1
+    # Validate end line is in diff
+    let valid_lines = $line_map | get line
+    let found_end = if ($valid_lines | where { $in >= $found_end } | is-not-empty) { $found_end } else { $ai_end }
+    if $found_start != $ai_start {
+      print $'    🔄 ($path): AI line ($ai_start)-($ai_end) → diff matched ($found_start)-($found_end)'
+    }
+    return { start_line: $found_start, end_line: $found_end }
   }
 
-  # Find nearest valid line (prefer lines >= reported_line)
-  let after = $valid_lines | where { $in >= $reported_line } | sort
-  let nearest = if ($after | is-not-empty) {
-    $after | first
-  } else {
-    let before = $valid_lines | where { $in < $reported_line } | sort
-    if ($before | is-not-empty) { $before | last } else { $reported_line }
+  # Prefer the match closest to the AI-reported line
+  let best = $matches | sort-by line | where { $in.line >= $ai_start } | get -o 0
+  let best = if ($best | is-not-empty) { $best } else { $matches | sort-by line | last }
+  let found_start = $best.line
+  let found_end = $found_start + $sug_line_count - 1
+
+  # Validate: end line should exist in the diff
+  let valid_lines = $line_map | get line
+  let found_end = if ($valid_lines | where { $in >= $found_end } | is-not-empty) { $found_end } else { $ai_end }
+
+  if $found_start != $ai_start or $found_end != $ai_end {
+    print $'    🔄 ($path): AI line ($ai_start)-($ai_end) → diff matched ($found_start)-($found_end)'
   }
-  print $'    🔄 ($path):($reported_line) → ($nearest) (line adjusted to nearest valid diff line)'
-  return $nearest
+  { start_line: $found_start, end_line: $found_end }
+}
+
+# Parse a unified diff patch and return a list of {line, content} for RIGHT-side lines
+# This builds a complete mapping from line number to code content
+def parse-diff-line-map [patch: string] {
+  let lines = $patch | lines
+  mut right_line = 0
+  mut result = []
+
+  for line in $lines {
+    if ($line | str starts-with '@@') {
+      let start = $line | str replace --regex '.*\+(\d+).*' '$1' | into int
+      if ($start | describe) == 'int' { $right_line = $start }
+    } else if $right_line > 0 {
+      if ($line | str starts-with '+') {
+        # Added line — strip the '+' prefix
+        let content = $line | str substring 1..< ($line | str length)
+        $result = $result | append { line: $right_line, content: $content }
+        $right_line += 1
+      } else if ($line | str starts-with '-') {
+        # Deleted line — not in RIGHT side
+      } else {
+        # Context line
+        let content = if ($line | str length) > 0 { $line | str substring 1..< ($line | str length) } else { '' }
+        $result = $result | append { line: $right_line, content: $content }
+        $right_line += 1
+      }
+    }
+  }
+  $result
 }
 
 # Parse a unified diff patch and return all valid RIGHT-side line numbers
@@ -480,6 +654,48 @@ def build-review-comment-body [section: string] {
   $parts | where { $in | is-not-empty } | str join "\n"
 }
 
+# Build a review comment body for findings WITHOUT suggestion block
+# Only includes severity and description (no suggestion button)
+def build-review-comment-body-no-suggestion [section: string] {
+  let lines = $section | lines
+
+  # Extract severity from heading line
+  let heading_line = $lines | where { ($in | str starts-with '###') and ($in | str contains '`') } | get -o 0
+  mut severity = ''
+  if ($heading_line | is-not-empty) {
+    if ($heading_line | str contains '❗') { $severity = '❗ Critical' }
+    if ($heading_line | str contains '⚠️') { $severity = '⚠️ Warning' }
+    if ($heading_line | str contains '💡') { $severity = '💡 Suggestion' }
+  }
+
+  # Extract problem description
+  let desc_lines = $lines | where { $in | str contains '**问题描述：**' }
+  let desc = if ($desc_lines | is-not-empty) {
+    $desc_lines | first | str replace --regex '^.*\*\*问题描述：\*\*\s*' ''
+  } else { '' }
+
+  # Extract 建议修改 text (may be plain text without diff)
+  let suggest_idx = try { $lines | enumerate | where { $in.item | str contains '**建议修改：**' } | get 0 | get index } catch { -1 }
+  let suggest_text = if $suggest_idx >= 0 {
+    # Take lines after 建议修改 until next section or empty
+    let after = $lines | skip ($suggest_idx + 1)
+    let relevant = $after | take while { $in | str starts-with '```' | not $in and ($in | str trim | is-not-empty) }
+    $relevant | str join '\n'
+  } else { '' }
+
+  # Build the comment body without suggestion block
+  let parts = [
+    $severity
+    ''
+    $desc
+  ]
+  if ($suggest_text | is-not-empty) {
+    $parts | append '' | append $suggest_text | str join "\n"
+  } else {
+    $parts | str join "\n"
+  }
+}
+
 # Extract the code between ```suggestion and closing ```
 # Cleans up any diff markers (-/+) that the AI may have mistakenly included
 def extract-suggestion-code [lines: list] {
@@ -498,9 +714,10 @@ def extract-suggestion-code [lines: list] {
     let end_idx = $end_entries | get 0 | get index
     $lines | skip ($start_idx + 1) | take ($end_idx - $start_idx - 1)
   }
-  # Clean diff markers: strip leading +/- with optional whitespace (AI may add them by mistake)
+  # Clean diff markers: only strip lines matching diff+line_number format like '+ 42:    code' or '- 42:    code'
+  # Do NOT strip bare +/- which may be legitimate code (e.g. Objective-C '- (void)method')
   $raw_lines | each {|line|
-    $line | str replace --regex '^[+-]\s*' ''
+    $line | str replace --regex '^[+-]\s*\d+:\s+' ''
   } | str join "\n"
 }
 
