@@ -19,7 +19,7 @@ inputs:
     required: true
     description: 'Your DeepSeek API token.'
   max-length:
-    default: 0
+    default: 128000
     required: false
     description: 'The maximum length of the content for review, 0 means no limit.'
   model:
@@ -79,24 +79,25 @@ inputs:
       ### Rules:
       - Auto-detect language from file extension, apply language-specific checks
       - Reference specific file:line for every finding
-      - Severity levels: ❗ Critical / ⚠️ Warning / 💡 Suggestion
+      - Severity levels: ❗ Critical only
       - For each finding with a code fix, ALWAYS provide a suggested change block using GitHub's suggestion syntax
       - Keep review concise, actionable, no filler
       - **ALL output must be in Chinese (简体中文)**
       - **Do NOT output introductory/concluding filler text** (e.g. '让我逐一检查这些问题', '以下是我的审查结果', '综上所述' etc). Start directly with findings.
+      - **Only report ❗ Critical level issues. Skip ⚠️ Warning and 💡 Suggestion levels.**
 
       ### Output Format (输出格式 - 使用中文):
-      Only output the findings section. Use pure Markdown (GitHub strips HTML style attributes).
+      First, output a brief summary of the PR's modified functionality as line-by-line enumeration (what this PR does), then output the findings section. Use pure Markdown (GitHub strips HTML style attributes).
       Each finding follows this structure:
 
       ---
 
-      ### [severity] `file/path:line`
+      ### ❗ `file/path:line`
 
       **修改内容：**
       ```diff lang
-      - L42: removed line
-      + L42: added line
+      - 42:    removed line
+      + 42:    added line
       ```
 
       **问题描述：** description in Chinese
@@ -113,20 +114,22 @@ inputs:
 
       IMPORTANT:
       - Replace `lang` with the file's language tag (e.g. `c`, `python`, `go`, `java`, `swift`, `rust`, `javascript`, `typescript`, `objc`, `shell`). Infer from file extension.
-      - In **修改内容** diff: prefix each line with line number like `L42:` so reviewers can locate code quickly
+      - Each finding heading uses severity emoji icon: ❗ for Critical. No text severity tag like [CRITICAL-1].
+      - In **修改内容** diff: +/- MUST be the first character on each line (required for GitHub red/green rendering). Put line number right after +/- with spacing, format: `- 42:    code` or `+ 42:    code`. Right-align line numbers for alignment (e.g. `42:`, `143:`). Do NOT use `L` prefix.
       - In **建议修改** diff: show before/after comparison using diff syntax, then provide a ```suggestion block for the "Commit Suggestion" button
       - The ```suggestion block MUST contain ONLY the replacement code (no `-` lines), enabling GitHub's one-click fix
       - Use ```diff <lang> code blocks for code comparison (GitHub renders red/green natively + syntax highlighting)
       - Separate each finding with ---
       - Do NOT use HTML with style attributes (GitHub strips them)
 
-      Priority badges:
-      - ❗ Critical
-      - ⚠️ Warning
-      - 💡 Suggestion
-
       Full output template:
-      ## 🔍 发现问题
+      #### 一、变更说明
+
+      - 修改了 xxx 功能
+      - 重构了 yyy 模块
+      - 新增了 zzz 接口
+
+      #### 二、发现问题
 
       ---
 
@@ -134,11 +137,11 @@ inputs:
 
       **修改内容：**
       ```diff c
-      - L42: ptr = malloc(size);
-      - L43: *ptr = value;
-      + L42: ptr = malloc(size);
-      + L43: if (ptr == NULL) { return -1; }
-      + L44: *ptr = value;
+      - 42:    ptr = malloc(size);
+      - 43:    *ptr = value;
+      + 42:    ptr = malloc(size);
+      + 43:    if (ptr == NULL) { return -1; }
+      + 44:    *ptr = value;
       ```
 
       **问题描述：** `malloc` 返回值未检查，当内存分配失败时 `ptr` 为 `NULL`，对 `NULL` 解引用会导致程序崩溃。
@@ -156,50 +159,6 @@ inputs:
       ptr = malloc(size);
       if (ptr == NULL) { return -1; }
       *ptr = value;
-      ```
-
-      ---
-
-      ### ⚠️ `utils.py:15`
-
-      **修改内容：**
-      ```diff python
-      - L15: f = open("data.txt")
-      + L15: with open("data.txt") as f:
-      ```
-
-      **问题描述：** 文件打开后未使用 `with` 语句，存在文件句柄泄漏风险。
-
-      **建议修改：**
-      ```diff python
-      - f = open("data.txt")
-      + with open("data.txt") as f:
-      ```
-
-      ```suggestion
-      with open("data.txt") as f:
-      ```
-
-      ---
-
-      ### 💡 `config.go:88`
-
-      **修改内容：**
-      ```diff go
-      - L88: if err == io.EOF {
-      + L88: if errors.Is(err, io.EOF) {
-      ```
-
-      **问题描述：** 直接比较错误值不支持错误链包裹，建议使用 `errors.Is`。
-
-      **建议修改：**
-      ```diff go
-      - if err == io.EOF {
-      + if errors.Is(err, io.EOF) {
-      ```
-
-      ```suggestion
-      if errors.Is(err, io.EOF) {
       ```
   user-prompt:
     required: false
@@ -238,7 +197,7 @@ runs:
   steps:
     - name: Checkout for local diff
       if: ${{ inputs.diff-from != '' }}
-      uses: actions/checkout@v4
+      uses: actions/checkout@v5
       with:
         fetch-depth: 0
 

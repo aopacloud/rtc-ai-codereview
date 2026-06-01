@@ -263,16 +263,29 @@ def post-comments-to-pr [
   }
 
   # 2. Parse findings and post inline review comments with suggestion blocks
+  # Requires commit_id for GitHub to position the comment on the correct diff line
+  let pr_data = try {
+    http get -H $BASE_HEADER $'($GITHUB_API_BASE)/repos/($repo)/pulls/($pr_number)'
+  } catch { null }
+  let commit_id = try { $pr_data | get -o head | get -o sha | default '' } catch { '' }
+
   let review_comment_url = $'($GITHUB_API_BASE)/repos/($repo)/pulls/($pr_number)/comments'
   let findings = parse-findings $comments
   for finding in $findings {
+    let payload = {
+      path: $finding.path
+      line: $finding.line
+      side: 'RIGHT'
+      body: $finding.body
+    }
+    # Include commit_id if available for accurate diff positioning
+    let payload = if ($commit_id | is-not-empty) {
+      $payload | merge { commit_id: $commit_id }
+    } else {
+      $payload
+    }
     try {
-      http post -t application/json -H $BASE_HEADER $review_comment_url {
-        path: $finding.path
-        line: $finding.line
-        side: 'RIGHT'
-        body: $finding.body
-      }
+      http post -t application/json -H $BASE_HEADER $review_comment_url $payload
       print $'  ✅ Posted review comment on ($finding.path):($finding.line)'
     } catch {|err|
       print $'  ⚠️ Skipped review comment on ($finding.path):($finding.line) - line may not be in diff'
@@ -315,13 +328,18 @@ def parse-findings [review: string] {
 }
 
 # Build a concise review comment body from a finding section
-# Extracts priority label, problem description, and suggestion block
+# Extracts severity icon, problem description, and suggestion block
 def build-review-comment-body [section: string] {
   let lines = $section | lines
 
-  # Find the priority label
-  let priority_line = $lines | where { $in | str contains '🔴' or $in | str contains '🟠' or $in | str contains '🟢' } | first
-  let priority = $priority_line | str replace --regex '.*?(🔴|🟠|🟢).*' '$1'
+  # Extract severity from heading line (### ❗ or ### ⚠️ or ### 💡)
+  let heading_line = $lines | where { ($in | str starts-with '###') and ($in | str contains '`') } | get -o 0
+  let severity = if ($heading_line | is-not-empty) {
+    if ($heading_line | str contains '❗') { '❗ Critical' }
+    else if ($heading_line | str contains '⚠️') { '⚠️ Warning' }
+    else if ($heading_line | str contains '💡') { '💡 Suggestion' }
+    else { '' }
+  } else { '' }
 
   # Extract problem description
   let desc_lines = $lines | where { $in | str contains '**问题描述：**' }
@@ -334,7 +352,7 @@ def build-review-comment-body [section: string] {
 
   # Build the comment body
   let parts = [
-    $priority
+    $severity
     ''
     $desc
     ''
