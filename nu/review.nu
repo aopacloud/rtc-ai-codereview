@@ -192,6 +192,19 @@ export def --env deepseek-review [
   }
 }
 
+# Strip the "二、发现问题" section header and all its content from the review markdown
+# The individual findings are posted as separate review comments, so they should not
+# appear in the Issue Comment (full markdown) to avoid duplication
+def strip-problem-section [review: string] {
+  let lines = $review | lines
+  # Find the line containing "二、发现问题"
+  let section_idx = try { $lines | enumerate | where { $in.item | str contains '二、发现问题' } | get 0 | get index } catch { -1 }
+  if $section_idx < 0 { return $review }
+  # Keep only lines before "二、发现问题" and trim trailing empty lines
+  let kept = $lines | take $section_idx | reverse | skip while { $in | str trim | is-empty } | reverse
+  $kept | str join "\n"
+}
+
 # Write the code review result to a file
 # Also saves suggestion payloads as JSON for local debugging
 def write-review-to-file [
