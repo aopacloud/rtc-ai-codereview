@@ -267,7 +267,7 @@ def post-comments-to-pr [
   let pr_data = try {
     http get -H $BASE_HEADER $'($GITHUB_API_BASE)/repos/($repo)/pulls/($pr_number)'
   } catch {|err|
-    print $'  ⚠️ Failed to fetch PR data for commit_id: ($err.msg? | default $err)'
+    print $'  ⚠️ Failed to fetch PR data for commit_id: (try { $err.msg? | default $'($err)' } catch { $'($err)' })'
     null
   }
   let commit_id = try { $pr_data | get -o head | get -o sha | default '' } catch { '' }
@@ -298,8 +298,9 @@ def post-comments-to-pr [
       http post -t application/json -H $BASE_HEADER $review_comment_url $payload
       print $'  ✅ Posted review comment on ($finding.path):($finding.line)'
     } catch {|err|
-      let err_msg = $err.msg? | default ($err | str substring 0..<200)
-      print $'  ⚠️ Skipped review comment on ($finding.path):($finding.line) - ($err_msg)'
+      let err_msg = try { $err.msg? | default '' } catch { '' }
+      let err_detail = if ($err_msg | is-not-empty) { $err_msg } else { try { $err | str substring 0..<200 } catch { $'($err)' } }
+      print $'  ⚠️ Skipped review comment on ($finding.path):($finding.line) - ($err_detail)'
     }
   }
 }
@@ -345,7 +346,7 @@ def build-review-comment-body [section: string] {
 
   # Extract severity from heading line (### ❗ or ### ⚠️ or ### 💡)
   let heading_line = $lines | where { ($in | str starts-with '###') and ($in | str contains '`') } | get -o 0
-  let severity = ''
+  mut severity = ''
   if ($heading_line | is-not-empty) {
     if ($heading_line | str contains '❗') { $severity = '❗ Critical' }
     if ($heading_line | str contains '⚠️') { $severity = '⚠️ Warning' }
