@@ -278,6 +278,11 @@ def post-comments-to-pr [
   let review_comment_url = $'($GITHUB_API_BASE)/repos/($repo)/pulls/($pr_number)/comments'
   let findings = parse-findings $comments
   print $'  📋 Parsed ($findings | length) findings with suggestion blocks'
+  # Debug: print each finding details
+  for f in $findings {
+    print $'  🔍 Finding: ($f.path):($f.line)'
+    print $'     body preview: ($f.body | str substring 0..<150)...'
+  }
 
   # Fetch the PR diff to validate line numbers
   let diff_hunks = try {
@@ -312,6 +317,14 @@ def post-comments-to-pr [
         $payload
       }
       try {
+        # Debug: print the payload being submitted
+        print $'  📤 Review comment payload:'
+        print $'     path: ($payload.path)'
+        print $'     line: ($payload.line)'
+        print $'     side: ($payload.side)'
+        print $'     commit_id: ($commit_id)'
+        print $'     body:'
+        print $payload.body
         http post -t application/json -H $BASE_HEADER $review_comment_url $payload
         print $'  ✅ Posted review comment on ($finding.path):($finding.line)'
       } catch {|err|
