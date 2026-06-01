@@ -116,6 +116,11 @@ export def --env deepseek-review [
     print 'Current Settings:'; hr-line
     $setting | compact-record | reject -o repo | print; print -n (char nl)
   }
+  # Print diff range info early so user can see it before review starts
+  let diff_range = build-diff-range $setting
+  if ($diff_range | is-not-empty) {
+    print $diff_range
+  }
 
   let content = (
     get-diff --pr-number $pr_number --repo $repo --diff-to $diff_to
@@ -162,9 +167,6 @@ export def --env deepseek-review [
     print $'✖️ Code review failed！No review result returned from ($base_url) ...'
     exit $ECODE.SERVER_ERROR
   }
-  # Build diff range summary for terminal print
-  let diff_range = build-diff-range $setting
-
   # Only include reasoning in action output (as collapsible details)
   let result = if ($reason | is-empty) {
     $review
@@ -183,10 +185,6 @@ export def --env deepseek-review [
     _ => { print $'Code Review Result:'; hr-line; print $result }
   }
 
-  # Print diff range info in terminal
-  if ($diff_range | is-not-empty) {
-    print $'(char nl)($diff_range)'
-  }
 
   if ($response.usage? | is-not-empty) {
     print $'(char nl)Token Usage:'; hr-line
