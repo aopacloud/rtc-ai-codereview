@@ -573,14 +573,16 @@ def parse-diff-line-map [patch: string] {
     } else if $right_line > 0 {
       if ($line | str starts-with '+') {
         # Added line — strip the '+' prefix
-        let content = $line | str substring 1..< ($line | str length)
+        let line_len = $line | str length
+        let content = $line | str substring 1..<$line_len
         $result = $result | append { line: $right_line, content: $content }
         $right_line += 1
       } else if ($line | str starts-with '-') {
         # Deleted line — not in RIGHT side
       } else {
         # Context line
-        let content = if ($line | str length) > 0 { $line | str substring 1..< ($line | str length) } else { '' }
+        let line_len = $line | str length
+        let content = if $line_len > 0 { $line | str substring 1..<$line_len } else { '' }
         $result = $result | append { line: $right_line, content: $content }
         $right_line += 1
       }
