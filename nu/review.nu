@@ -290,7 +290,7 @@ def post-comments-to-pr [
       { path: $f.filename, additions: $f.additions, changes: $f.changes, patch: $patch }
     } | where { $in.changes > 0 }
   } catch { [] }
-  print $'  📋 Fetched diff info for ($diff_hunks | length) file(s)'
+  print $'  📋 Fetched diff info for ($diff_hunks | length) files'
 
   for finding in $findings {
     # Validate the line number using diff info
