@@ -338,39 +338,21 @@ def parse-findings [review: string] {
 }
 
 # Build a concise review comment body from a finding section
-# Extracts severity icon, problem description, and suggestion block
+# Only outputs the ```suggestion block for the inline review comment
+# (The full review with 修改内容/问题描述/建议修改 is already posted as issue comment)
 def build-review-comment-body [section: string] {
   let lines = $section | lines
 
-  # Extract severity from heading line (### ❗ or ### ⚠️ or ### 💡)
-  let heading_line = $lines | where { ($in | str starts-with '###') and ($in | str contains '`') } | get -o 0
-  mut severity = ''
-  if ($heading_line | is-not-empty) {
-    if ($heading_line | str contains '❗') { $severity = '❗ Critical' }
-    if ($heading_line | str contains '⚠️') { $severity = '⚠️ Warning' }
-    if ($heading_line | str contains '💡') { $severity = '💡 Suggestion' }
-  }
-
-  # Extract problem description
-  let desc_lines = $lines | where { $in | str contains '**问题描述：**' }
-  let desc = if ($desc_lines | is-not-empty) {
-    $desc_lines | first | str replace --regex '^.*\*\*问题描述：\*\*\s*' ''
-  } else { '' }
-
-  # Extract suggestion code
+  # Extract suggestion code only
   let suggestion_code = extract-suggestion-code $lines
 
-  # Build the comment body
+  # Build the comment body: suggestion block only
   let parts = [
-    $severity
-    ''
-    $desc
-    ''
     '```suggestion'
     $suggestion_code
     '```'
   ]
-  $parts | where { $in | is-not-empty } | str join "\n"
+  $parts | str join "\n"
 }
 
 # Extract the code between ```suggestion and closing ```
