@@ -279,26 +279,46 @@ def post-comments-to-pr [
   let findings = parse-findings $comments
   print $'  📋 Parsed ($findings | length) findings with suggestion blocks'
 
+  # Fetch the PR diff to validate line numbers
+  let diff_hunks = try {
+    let diff_data = http get -H $BASE_HEADER $'($GITHUB_API_BASE)/repos/($repo)/pulls/($pr_number)'
+    let diff_url = $diff_data.diff_url? | default ''
+    # Use the commits API to get per-file diff info
+    let files = http get -H $BASE_HEADER $'($GITHUB_API_BASE)/repos/($repo)/pulls/($pr_number)/files'
+    $files | each {|f|
+      let patch = $f.patch? | default ''
+      { path: $f.filename, additions: $f.additions, changes: $f.changes, patch: $patch }
+    } | where { $in.changes > 0 }
+  } catch { [] }
+  print $'  📋 Fetched diff info for ($diff_hunks | length) file(s)'
+
   for finding in $findings {
-    let payload = {
-      path: $finding.path
-      line: $finding.line
-      side: 'RIGHT'
-      body: $finding.body
-    }
-    # Include commit_id if available for accurate diff positioning
-    let payload = if ($commit_id | is-not-empty) {
-      $payload | merge { commit_id: $commit_id }
+    # Validate the line number using diff info
+    let line = validate-line-in-diff $finding $diff_hunks
+    # If line was adjusted, skip this finding — suggestion content won't match the adjusted line
+    if $line != $finding.line {
+      print $'  ⚠️ Skipped review comment on ($finding.path):($finding.line) - line adjusted to ($line), suggestion content may not match'
     } else {
-      $payload
-    }
-    try {
-      http post -t application/json -H $BASE_HEADER $review_comment_url $payload
-      print $'  ✅ Posted review comment on ($finding.path):($finding.line)'
-    } catch {|err|
-      let err_msg = try { $err.msg? | default '' } catch { '' }
-      let err_detail = if ($err_msg | is-not-empty) { $err_msg } else { try { $err | str substring 0..<200 } catch { $'($err)' } }
-      print $'  ⚠️ Skipped review comment on ($finding.path):($finding.line) - ($err_detail)'
+      let payload = {
+        path: $finding.path
+        line: $line
+        side: 'RIGHT'
+        body: $finding.body
+      }
+      # Include commit_id if available for accurate diff positioning
+      let payload = if ($commit_id | is-not-empty) {
+        $payload | merge { commit_id: $commit_id }
+      } else {
+        $payload
+      }
+      try {
+        http post -t application/json -H $BASE_HEADER $review_comment_url $payload
+        print $'  ✅ Posted review comment on ($finding.path):($finding.line)'
+      } catch {|err|
+        let err_msg = try { $err.msg? | default '' } catch { '' }
+        let err_detail = if ($err_msg | is-not-empty) { $err_msg } else { try { $err | str substring 0..<200 } catch { $'($err)' } }
+        print $'  ⚠️ Skipped review comment on ($finding.path):($finding.line) - ($err_detail)'
+      }
     }
   }
 }
@@ -335,6 +355,80 @@ def parse-findings [review: string] {
 
     { path: $path, line: $line, body: $body }
   } | where { $in | is-not-empty }
+}
+
+# Validate and fix the line number for a finding using the PR diff patch
+# GitHub Review Comment API requires the line to exist in the diff (RIGHT side)
+# If the AI-reported line is a deleted line, find the nearest valid line in the diff
+ def validate-line-in-diff [finding: record, diff_hunks: list] {
+  let path = $finding.path
+  let reported_line = $finding.line
+
+  # Find the matching file in diff
+  let file_info = $diff_hunks | where { $in.path == $path } | get -o 0
+  if ($file_info | is-empty) {
+    print $'    ℹ️ ($path) not found in diff, using reported line ($reported_line)'
+    return $reported_line
+  }
+  let patch = $file_info.patch
+  if ($patch | is-empty) {
+    print $'    ℹ️ No patch for ($path), using reported line ($reported_line)'
+    return $reported_line
+  }
+
+  # Parse @@ -old_start,count +new_start,count @@ to build line mapping
+  # Collect all valid RIGHT-side line numbers from the patch
+  let valid_lines = parse-diff-valid-lines $patch
+  if ($valid_lines | is-empty) {
+    print $'    ℹ️ Could not parse patch for ($path), using reported line ($reported_line)'
+    return $reported_line
+  }
+
+  # Check if reported line is valid
+  let is_valid = $valid_lines | where { $in == $reported_line } | length
+  if $is_valid > 0 {
+    return $reported_line
+  }
+
+  # Find nearest valid line (prefer lines >= reported_line)
+  let after = $valid_lines | where { $in >= $reported_line } | sort
+  let nearest = if ($after | is-not-empty) {
+    $after | first
+  } else {
+    let before = $valid_lines | where { $in < $reported_line } | sort
+    if ($before | is-not-empty) { $before | last } else { $reported_line }
+  }
+  print $'    🔄 ($path):($reported_line) → ($nearest) (line adjusted to nearest valid diff line)'
+  return $nearest
+}
+
+# Parse a unified diff patch and return all valid RIGHT-side line numbers
+# These are lines that exist in the new version and appear in the diff
+ def parse-diff-valid-lines [patch: string] {
+  let lines = $patch | lines
+  mut right_line = 0
+  mut valid = []
+
+  for line in $lines {
+    # Parse hunk header: @@ -old_start,count +new_start,count @@
+    if ($line | str starts-with '@@') {
+      let start = $line | str replace --regex '.*\+(\d+).*' '$1' | into int
+      if ($start | describe) == 'int' { $right_line = $start }
+    } else if $right_line > 0 {
+      if ($line | str starts-with '+') {
+        # Added line — valid RIGHT line
+        $valid = $valid | append $right_line
+        $right_line += 1
+      } else if ($line | str starts-with '-') {
+        # Deleted line — NOT a valid RIGHT line, don't increment right_line
+        } else {
+        # Context line (space or empty) — valid RIGHT line
+        $valid = $valid | append $right_line
+        $right_line += 1
+      }
+    }
+  }
+  $valid
 }
 
 # Build a concise review comment body from a finding section
@@ -374,6 +468,7 @@ def build-review-comment-body [section: string] {
 }
 
 # Extract the code between ```suggestion and closing ```
+# Cleans up any diff markers (-/+) that the AI may have mistakenly included
 def extract-suggestion-code [lines: list] {
   let enumerated = $lines | enumerate
   # Find the line index of ```suggestion
@@ -383,13 +478,17 @@ def extract-suggestion-code [lines: list] {
   # Find the next ``` after the start
   let after_start = $enumerated | where { $in.index > $start_idx }
   let end_entries = $after_start | where { $in.item | str starts-with '```' }
-  if ($end_entries | is-empty) {
+  let raw_lines = if ($end_entries | is-empty) {
     # No closing ```, take all remaining lines
-    $lines | skip ($start_idx + 1) | str join "\n"
+    $lines | skip ($start_idx + 1)
   } else {
     let end_idx = $end_entries | get 0 | get index
-    $lines | skip ($start_idx + 1) | take ($end_idx - $start_idx - 1) | str join "\n"
+    $lines | skip ($start_idx + 1) | take ($end_idx - $start_idx - 1)
   }
+  # Clean diff markers: strip leading +/- with optional whitespace (AI may add them by mistake)
+  $raw_lines | each {|line|
+    $line | str replace --regex '^[+-]\s*' ''
+  } | str join "\n"
 }
 
 # Output the streaming response of review result from DeepSeek API

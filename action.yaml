@@ -129,7 +129,7 @@ inputs:
       - 重构了 yyy 模块
       - 新增了 zzz 接口
 
-      <!--
+  
       #### 二、发现问题
 
       ---
@@ -161,7 +161,7 @@ inputs:
       if (ptr == NULL) { return -1; }
       *ptr = value;
       ```
-      -->
+   
   user-prompt:
     required: false
     default: 'Please review the following code changes'
