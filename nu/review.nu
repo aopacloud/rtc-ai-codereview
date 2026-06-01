@@ -266,11 +266,21 @@ def post-comments-to-pr [
   # Requires commit_id for GitHub to position the comment on the correct diff line
   let pr_data = try {
     http get -H $BASE_HEADER $'($GITHUB_API_BASE)/repos/($repo)/pulls/($pr_number)'
-  } catch { null }
+  } catch {|err|
+    print $'  ⚠️ Failed to fetch PR data for commit_id: ($err.msg? | default $err)'
+    null
+  }
   let commit_id = try { $pr_data | get -o head | get -o sha | default '' } catch { '' }
+  if ($commit_id | is-not-empty) {
+    print $'  📌 commit_id: ($commit_id)'
+  } else {
+    print $'  ⚠️ No commit_id available, review comments may fail to position'
+  }
 
   let review_comment_url = $'($GITHUB_API_BASE)/repos/($repo)/pulls/($pr_number)/comments'
   let findings = parse-findings $comments
+  print $'  📋 Parsed ($findings | length) finding(s) with suggestion blocks'
+
   for finding in $findings {
     let payload = {
       path: $finding.path
@@ -288,7 +298,8 @@ def post-comments-to-pr [
       http post -t application/json -H $BASE_HEADER $review_comment_url $payload
       print $'  ✅ Posted review comment on ($finding.path):($finding.line)'
     } catch {|err|
-      print $'  ⚠️ Skipped review comment on ($finding.path):($finding.line) - line may not be in diff'
+      let err_msg = $err.msg? | default ($err | str substring 0..<200)
+      print $'  ⚠️ Skipped review comment on ($finding.path):($finding.line) - ($err_msg)'
     }
   }
 }
