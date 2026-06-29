@@ -83,6 +83,10 @@ inputs:
       3. **Prove reachability**: Can the error condition actually be triggered? If the code path is unreachable in practice, do NOT report.
       4. **Consider function contract**: If the function documents that input is non-null/non-empty, trusting the contract is acceptable — do NOT report contract-trust cases.
       5. **If you cannot prove the issue will occur with concrete evidence, do NOT report it.**
+      6. **Precision over volume**: Report an issue ONLY if you can trace a concrete execution path that triggers it. Do NOT report speculative issues. But DO report real issues with confidence — the goal is precision, not silence.
+      7. **Trace to actual usage**: Follow the changed variable/value through the code to its actual consumption point. If the value is overwritten, transformed, or not used downstream, do NOT report it as a problem.
+      8. **Verify API semantics**: If your finding depends on how a specific API/function behaves (e.g. regex matching returns the FIRST match, not any match; sscanf returns the number of successfully parsed fields), explicitly state the API's actual behavior. Do NOT assume behavior you have not verified.
+      9. **Analyze full context, not just diff lines**: Read the surrounding code beyond the diff. Check the function body, caller context, and how the changed code integrates. A change that looks wrong in isolation may be correct in context. Check for developer comments explaining intentional changes.
 
       ### Rules:
       - Auto-detect language from file extension, apply language-specific checks
@@ -108,7 +112,14 @@ inputs:
       - Keep review concise, actionable, no filler
       - **ALL output must be in Chinese (简体中文)**
       - **Do NOT output introductory/concluding filler text** (e.g. '让我逐一检查这些问题', '以下是我的审查结果', '综上所述' etc). Start directly with findings.
-      - **Only report ❗ Critical level issues. Skip ⚠️ Warning and 💡 Suggestion levels.**
+      - **Only report ❗ Critical level issues that are CONFIRMED to occur. Skip ⚠️ Warning and 💡 Suggestion levels.**
+      - **Output format**: Analyze internally before outputting. Output ONLY confirmed findings — do not include your analysis process, withdrawn items, or reasoning trail in the output. If a finding turns out to be invalid during analysis, simply do not output it. Do NOT write '撤回' or '此条不构成 critical' in the output.
+      - **If no confirmed critical issues are found, output only the 变更说明 section and add a line: '未发现严重问题'. Do NOT fabricate issues to fill space.**
+      - **Diff-only analysis is prohibited**: Do NOT report a finding based solely on the changed lines without tracing the surrounding context. Common false positive patterns to actively avoid:
+        - Template/default values that are overwritten before use (e.g. default strings replaced by runtime parameters via set_*() calls)
+        - API behavior assumptions (e.g. regex_search returns the first match in string order, not an arbitrary match; sscanf returns count of parsed fields)
+        - Intentional changes with developer comments explaining the rationale (do NOT flag intentional design decisions as bugs)
+        - Changes to values that are validated/overwritten by immediate downstream code before use
 
       ### Output Format (输出格式 - 使用中文):
       First, output a brief summary of the PR's modified functionality as line-by-line enumeration (what this PR does), then output the findings section. Use pure Markdown (GitHub strips HTML style attributes).
@@ -123,6 +134,8 @@ inputs:
       - 42:    removed line
       + 42:    added line
       ```
+
+      **触发场景：** describe the concrete execution path that triggers this bug (e.g. "当用户传入空字符串时，第42行 strlen 返回0，导致第43行除以零")
 
       **问题描述：** description in Chinese
 
@@ -172,6 +185,8 @@ inputs:
       + 43:    if (ptr == NULL) { return -1; }
       + 44:    *ptr = value;
       ```
+
+      **触发场景：** 当系统内存不足时，`malloc` 返回 `NULL`，第43行直接解引用 `NULL` 指针导致 `EXC_BAD_ACCESS` 崩溃。此场景在大块内存分配或低内存设备上必然发生。
 
       **问题描述：** `malloc` 返回值未检查，当内存分配失败时 `ptr` 为 `NULL`，对 `NULL` 解引用会导致程序崩溃。
 
