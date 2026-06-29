@@ -28,7 +28,7 @@ inputs:
     description: 'The MiniMax model to choose for code review.'
   temperature:
     required: false
-    default: 0.3
+    default: 0.1
     description: 'The temperature of the model.'
   base-url:
     required: false
@@ -76,10 +76,34 @@ inputs:
          - Is there duplicated logic that already exists elsewhere?
          - Are there unused imports, dead code, or redundant checks introduced?
 
+      ### Verification Before Reporting (报告前自验证):
+      Before reporting ANY finding, you MUST verify it will actually occur by tracing the real code path:
+      1. **Trace data flow**: Is the variable/input actually nullable or attacker-controlled at this point? If a guard/check already exists upstream, do NOT report.
+      2. **Check existing guards**: Is there already a null check, bounds check, or error handler before the reported line? If yes, do NOT report.
+      3. **Prove reachability**: Can the error condition actually be triggered? If the code path is unreachable in practice, do NOT report.
+      4. **Consider function contract**: If the function documents that input is non-null/non-empty, trusting the contract is acceptable — do NOT report contract-trust cases.
+      5. **If you cannot prove the issue will occur with concrete evidence, do NOT report it.**
+
       ### Rules:
       - Auto-detect language from file extension, apply language-specific checks
       - Reference specific file:line for every finding
-      - Severity levels: ❗ Critical only
+      - **Severity definition — ❗ Critical ONLY** (report a finding ONLY if it meets at least one of these criteria):
+        - Will cause crash / panic / exception / abort at runtime
+        - Will cause data corruption or data loss
+        - Will cause security vulnerability (injection, auth bypass, info leak)
+        - Will break existing functionality or API contract (regression)
+        - Will cause resource exhaustion (memory leak, fd leak, goroutine leak) under normal operation
+        - Contains a logic error that produces incorrect output for valid input
+      - **Do NOT report the following (low-severity, always skip)**:
+        - Spelling mistakes, typos
+        - Naming convention violations (camelCase vs snake_case, etc.)
+        - Code formatting / indentation style
+        - Import ordering or unused imports (unless they cause a build failure)
+        - Missing comments or documentation
+        - Code duplication that doesn't introduce bugs
+        - Minor performance optimizations with no measurable impact
+        - Suggestions for "better" APIs that are functionally equivalent
+        - Style preferences or subjective design pattern recommendations
       - For each finding with a code fix, ALWAYS provide a suggested change block using GitHub's suggestion syntax
       - Keep review concise, actionable, no filler
       - **ALL output must be in Chinese (简体中文)**
@@ -168,7 +192,7 @@ inputs:
    
   user-prompt:
     required: false
-    default: 'Please review the following code changes'
+    default: 'Review the following code changes strictly. For each potential issue, verify that it will ACTUALLY occur by tracing the code path — do not report speculative or theoretical issues. Only report critical problems that cause crashes, data corruption, security vulnerabilities, or incorrect behavior. Ignore style, naming, formatting, and documentation issues.'
     description: 'The user prompt for DeepSeek API.'
   include-patterns:
     required: false
