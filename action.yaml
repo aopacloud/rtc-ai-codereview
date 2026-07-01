@@ -24,7 +24,7 @@ inputs:
     description: 'The maximum length of the content for review, 0 means no limit.'
   model:
     required: false
-    default: 'MiniMax-M3'
+    default: 'ark-code-latest'
     description: 'The MiniMax model to choose for code review.'
   temperature:
     required: false
@@ -32,7 +32,7 @@ inputs:
     description: 'The temperature of the model.'
   base-url:
     required: false
-    default: 'https://api.minimaxi.com/v1'
+    default: 'https://ark.cn-beijing.volces.com/api/plan/v3'
     description: 'The base url of minimax API.'
   sys-prompt:
     required: false
@@ -207,7 +207,7 @@ inputs:
    
   user-prompt:
     required: false
-    default: 'Review the following code changes strictly. For each potential issue, verify that it will ACTUALLY occur by tracing the code path — do not report speculative or theoretical issues. Only report critical problems that cause crashes, data corruption, security vulnerabilities, or incorrect behavior. Ignore style, naming, formatting, and documentation issues.'
+    default: 'Review the following code changes strictly. For each potential issue, verify that it will ACTUALLY occur by tracing the code path — do not report speculative or theoretical issues. Only report critical problems that cause crashes, data corruption, security vulnerabilities, or incorrect behavior. Ignore style, naming, formatting, and documentation issues. For Go code, actively check: (1) make() slice init — make([]T, n) creates n zero-valued elements NOT capacity n, use make([]T, 0, n) for capacity; (2) functions returning *T to mutex-protected data — if the caller reads without holding the lock, it is a data race; (3) writing to a nil struct field panics, but protobuf getters on nil return zero values safely.'
     description: 'The user prompt for DeepSeek API.'
   include-patterns:
     required: false
