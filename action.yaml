@@ -17,7 +17,7 @@ branding:
 inputs:
   chat-token:
     required: true
-    description: 'Your MiniMax API token.'
+    description: 'Your GLM API token.'
   max-length:
     default: 0
     required: false
@@ -25,7 +25,7 @@ inputs:
   model:
     required: false
     default: 'ark-code-latest'
-    description: 'The MiniMax model to choose for code review.'
+    description: 'The GLM model to choose for code review.'
   temperature:
     required: false
     default: 0.1
@@ -33,7 +33,7 @@ inputs:
   base-url:
     required: false
     default: 'https://ark.cn-beijing.volces.com/api/plan/v3'
-    description: 'The base url of minimax API.'
+    description: 'The base url of GLM API.'
   sys-prompt:
     required: false
     default: |

@@ -125,7 +125,9 @@ export def --env deepseek-review [
   let content = (
     get-diff --pr-number $pr_number --repo $repo --diff-to $diff_to
              --diff-from $diff_from --include $include --exclude $exclude --patch-cmd $patch_cmd)
+  print $'(char nl)Diff fetched, calculating length...'
   let length = $content | str stats | get unicode-width
+  print $'Diff length calculated: ($length) chars'
   if ($max_length != 0) and ($length > $max_length) {
     print $'(char nl)(ansi r)The content length ($length) exceeds the maximum limit ($max_length), review skipped.(ansi reset)'
     exit $ECODE.SUCCESS
@@ -133,21 +135,14 @@ export def --env deepseek-review [
   print $'Review content length: (ansi g)($length)(ansi reset), current max length: (ansi g)($max_length)(ansi reset)'
   let sys_prompt = $sys_prompt | default $env.SYSTEM_PROMPT? | default $DEFAULT_OPTIONS.SYS_PROMPT
   let user_prompt = $user_prompt | default $env.USER_PROMPT? | default $DEFAULT_OPTIONS.USER_PROMPT
-  let payload = {
-    model: $model,
-    stream: $stream,
-    temperature: $temperature,
-    messages: [
-      { role: 'system', content: $sys_prompt },
-      { role: 'user', content: $"($user_prompt):\n($content)" }
-    ],
-    thinking: { type: 'disabled' }
-  }
+  
   if $debug { print $'(char nl)Code Changes:'; hr-line; print $content }
-  print $'(char nl)Waiting for response from (ansi g)($url)(ansi reset) ...'
-  if $stream { streaming-output $url $payload --headers $CHAT_HEADER --debug=$debug; return }
-
-  let response = http post -e -H $CHAT_HEADER -t application/json $url $payload
+  
+  # Review content: single API call for small diff, chunked review for large diff
+  # Both paths use 10-minute timeout for API calls
+  let chunk_result = review-in-chunks $content $max_length $url $CHAT_HEADER $model $temperature $sys_prompt $user_prompt --debug=$debug
+  let response = $chunk_result.response
+  
   if ($response | is-empty) {
     print $'(ansi r)Oops, No response returned from ($url) ...(ansi reset)'
     exit $ECODE.SERVER_ERROR
@@ -190,6 +185,204 @@ export def --env deepseek-review [
     print $'(char nl)Token Usage:'; hr-line
     $response.usage? | table -e | print
   }
+}
+
+# Split a large diff into file-based chunks for batch review
+# Each chunk is a diff for one or more files, kept under max_chunk_size
+# Returns a list of { files: [string], content: string }
+def split-diff-by-file [content: string, max_chunk_size: int] {
+  # Split by 'diff --git' marker — each file diff starts with it
+  let lines = $content | lines
+  # Find indices of lines starting with 'diff --git'
+  let file_starts = $lines | enumerate | where { $in.item | str starts-with 'diff --git' } | get index
+  
+  if ($file_starts | length) <= 1 {
+    # Single file or no file marker — return as one chunk
+    return [{ files: ['all'], content: $content }]
+  }
+  
+  # Build list of file diff ranges: { start_idx, end_idx, files }
+  mut chunks = []
+  mut current_content = ''
+  mut current_files = []
+  mut current_size = 0
+  
+  for i in 0..<($file_starts | length) {
+    let start = $file_starts | get $i
+    let end = if $i + 1 < ($file_starts | length) {
+      $file_starts | get ($i + 1)
+    } else {
+      $lines | length
+    }
+    # Extract this file's diff lines
+    let file_diff = $lines | skip $start | take ($end - $start) | str join '\n'
+    let file_size = $file_diff | str stats | get unicode-width
+    # Extract file path from the 'diff --git a/path b/path' line
+    let header = $lines | get $start
+    let file_path = $header | str replace --regex 'diff --git a/\S+ b/' '' | str trim
+    
+    # If adding this file would exceed max_chunk_size and current chunk is not empty,
+    # flush current chunk and start a new one
+    if $current_size + $file_size > $max_chunk_size and ($current_files | length) > 0 {
+      $chunks = $chunks | append { files: $current_files, content: $current_content }
+      $current_content = ''
+      $current_files = []
+      $current_size = 0
+    }
+    
+    # Add this file to current chunk
+    if ($current_content | is-empty) {
+      $current_content = $file_diff
+    } else {
+      $current_content = $current_content + '\n\n' + $file_diff
+    }
+    $current_files = $current_files | append $file_path
+    $current_size = $current_size + $file_size
+  }
+  
+  # Flush remaining chunk
+  if ($current_files | length) > 0 {
+    $chunks = $chunks | append { files: $current_files, content: $current_content }
+  }
+  
+  $chunks
+}
+
+# Review a single diff chunk and return the review result
+# Returns { review: string, usage: record }
+def review-single-chunk [
+  chunk: record,         # { files: [string], content: string }
+  url: string,           # API URL
+  headers: list,         # HTTP headers
+  model: string,         # Model name
+  temperature: float,    # Temperature
+  sys_prompt: string,    # System prompt
+  user_prompt: string,   # User prompt
+  chunk_index: int,      # Current chunk index (0-based)
+  total_chunks: int,     # Total number of chunks
+] {
+  let payload = {
+    model: $model,
+    stream: false,
+    temperature: $temperature,
+    messages: [
+      { role: 'system', content: $sys_prompt },
+      { role: 'user', content: $"($user_prompt):\n($chunk.content)" }
+    ],
+    thinking: { type: 'disabled' }
+  }
+  
+  print $'\n📦 Reviewing chunk ($chunk_index + 1)/($total_chunks) with ($chunk.files | length) files...'
+  let file_list = $chunk.files | str join ", "
+  print $'   files: ($file_list)'
+  print $'   size: ($chunk.content | str stats | get unicode-width) chars'
+  print $'   Waiting for response from (ansi g)($url)(ansi reset) ...'
+  
+  # Set 10-minute timeout for API call
+  let response = http post -e -m 10min -H $headers -t application/json $url $payload
+  
+  if ($response | is-empty) {
+    print $'(ansi r)No response returned from ($url) ...(ansi reset)'
+    return { review: '', usage: {} }
+  }
+  
+  if ($response | describe) == 'string' {
+    print $'(ansi r)Chunk ($chunk_index + 1) review failed: ($response)(ansi reset)'
+    return { review: '', usage: {} }
+  }
+  
+  let message = $response | get -o choices.0.message
+  let review = $message.content? | default ($response | get -o message.content) | default ''
+  # Strip inline thinking blocks
+  let review = $review | str replace --all --regex '(?s)<think>.*?</think>\s*' ''
+  let review = $review | str trim
+  let usage = $response.usage? | default {}
+  
+  if ($review | is-empty) {
+    print $'(ansi y)Chunk ($chunk_index + 1): no issues found or empty response(ansi reset)'
+  } else {
+    print $'✅ Chunk ($chunk_index + 1) reviewed, ($review | lines | length) lines returned'
+  }
+  
+  { review: $review, usage: $usage }
+}
+
+# Review large diff content in chunks and merge results
+# Returns { result: string, usage: record, responses: list }
+def review-in-chunks [
+  content: string,        # Full diff content
+  max_length: int,        # Max length per chunk (0 = no chunking)
+  url: string,            # API URL
+  headers: list,          # HTTP headers
+  model: string,          # Model name
+  temperature: float,     # Temperature
+  sys_prompt: string,     # System prompt
+  user_prompt: string,    # User prompt
+  --debug,               # Debug mode
+] {
+  let total_length = $content | str stats | get unicode-width
+  let DEFAULT_CHUNK_SIZE = 1000000  # ~1MB per chunk
+  
+  # Determine if chunking is needed
+  let needs_chunking = $total_length > $DEFAULT_CHUNK_SIZE
+  
+  if not $needs_chunking {
+    # Small enough — single API call with 10-min timeout
+    let payload = {
+      model: $model,
+      stream: false,
+      temperature: $temperature,
+      messages: [
+        { role: 'system', content: $sys_prompt },
+        { role: 'user', content: $"($user_prompt):\n($content)" }
+      ],
+      thinking: { type: 'disabled' }
+    }
+    print $'\nWaiting for response from (ansi g)($url)(ansi reset) ...'
+    let response = http post -e -m 10min -H $headers -t application/json $url $payload
+    return { response: $response, chunked: false }
+  }
+  
+  # Large diff — split by file and review in chunks
+  print $'\n📊 Content size ($total_length) exceeds chunk threshold ($DEFAULT_CHUNK_SIZE), switching to file-by-file chunked review...'
+  let chunks = split-diff-by-file $content $DEFAULT_CHUNK_SIZE
+  let total_chunks = $chunks | length
+  print $'📦 Split into ($total_chunks) chunks'
+  
+  mut all_reviews = []
+  mut total_usage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }
+  mut all_responses = []
+  
+  for i in 0..<$total_chunks {
+    let chunk = $chunks | get $i
+    let result = review-single-chunk $chunk $url $headers $model $temperature $sys_prompt $user_prompt $i $total_chunks
+    
+    if ($result.review | is-not-empty) {
+      $all_reviews = $all_reviews | append $result.review
+    }
+    
+    # Accumulate token usage
+    if ($result.usage | is-not-empty) {
+      $total_usage = {
+        prompt_tokens: ($total_usage.prompt_tokens + ($result.usage.prompt_tokens? | default 0))
+        completion_tokens: ($total_usage.completion_tokens + ($result.usage.completion_tokens? | default 0))
+        total_tokens: ($total_usage.total_tokens + ($result.usage.total_tokens? | default 0))
+      }
+    }
+    $all_responses = $all_responses | append { chunk: ($i + 1), usage: $result.usage }
+  }
+  
+  # Merge all chunk reviews into one result
+  let merged_review = $all_reviews | str join '\n\n---\n\n'
+  print $'\n✅ All ($total_chunks) chunks reviewed. Merged result: ($merged_review | lines | length) lines'
+  
+  # Build a synthetic response record for compatibility
+  let synthetic_response = {
+    choices: [{ message: { content: $merged_review } }]
+    usage: $total_usage
+  }
+  
+  { response: $synthetic_response, chunked: true, responses: $all_responses }
 }
 
 # Strip the "二、发现问题" section header and all its content from the review markdown
@@ -303,7 +496,7 @@ def post-comments-to-pr [
   let comment_body = strip-problem-section $comments
   let comment_url = $'($GITHUB_API_BASE)/repos/($repo)/issues/($pr_number)/comments'
   try {
-    http post -t application/json -H $BASE_HEADER $comment_url { body: $comment_body }
+    http post -m 10min -t application/json -H $BASE_HEADER $comment_url { body: $comment_body }
   } catch {|err|
     print $'(ansi r)Failed to post comments to PR: (ansi reset)'
     $err | table -e | print
@@ -313,7 +506,7 @@ def post-comments-to-pr [
   # 2. Parse findings and post inline review comments with suggestion blocks
   # Requires commit_id for GitHub to position the comment on the correct diff line
   let pr_data = try {
-    http get -H $BASE_HEADER $'($GITHUB_API_BASE)/repos/($repo)/pulls/($pr_number)'
+    http get -m 10min -H $BASE_HEADER $'($GITHUB_API_BASE)/repos/($repo)/pulls/($pr_number)'
   } catch {|err|
     print $'  ⚠️ Failed to fetch PR data for commit_id: (try { $err.msg? | default $'($err)' } catch { $'($err)' })'
     null
@@ -336,10 +529,10 @@ def post-comments-to-pr [
 
   # Fetch the PR diff to validate line numbers
   let diff_hunks = try {
-    let diff_data = http get -H $BASE_HEADER $'($GITHUB_API_BASE)/repos/($repo)/pulls/($pr_number)'
+    let diff_data = http get -m 10min -H $BASE_HEADER $'($GITHUB_API_BASE)/repos/($repo)/pulls/($pr_number)'
     let diff_url = $diff_data.diff_url? | default ''
     # Use the commits API to get per-file diff info
-    let files = http get -H $BASE_HEADER $'($GITHUB_API_BASE)/repos/($repo)/pulls/($pr_number)/files'
+    let files = http get -m 10min -H $BASE_HEADER $'($GITHUB_API_BASE)/repos/($repo)/pulls/($pr_number)/files'
     $files | each {|f|
       let patch = $f.patch? | default ''
       { path: $f.filename, additions: $f.additions, changes: $f.changes, patch: $patch }
@@ -394,7 +587,7 @@ def post-comments-to-pr [
       print $'     commit_id: ($commit_id)'
       print $'     body:'
       print $payload.body
-      http post -t application/json -H $BASE_HEADER $review_comment_url $payload
+      http post -m 10min -t application/json -H $BASE_HEADER $review_comment_url $payload
       print $'  ✅ Posted review comment on ($finding.path):($start_line)-($end_line) [($sug_tag)]'
     } catch {|err|
       let err_msg = try { $err.msg? | default '' } catch { '' }
@@ -747,7 +940,7 @@ def streaming-output [
   print -n (char nl)
   kv set content 0
   kv set reasoning 0
-  http post -e -H $headers -t application/json $url $payload
+  http post -e -m 10min -H $headers -t application/json $url $payload
     | tee {
         let res = $in
         let type = $res | describe

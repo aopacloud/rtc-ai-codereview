@@ -125,6 +125,8 @@ def get-patch-diff [
 }
 
 # Apply file filters to the diff content to include or exclude specific files
+# NOTE: We avoid `try { ... } catch` around external command pipes for large diffs
+# because Nu Shell's try block buffers the entire pipe output, causing hangs on 2MB+ content.
 def apply-file-filters [
   content: string,      # The diff content to filter
   --include: string,    # Comma separated file patterns to include in the code review
@@ -136,22 +138,32 @@ def apply-file-filters [
 
   if ($include | is-not-empty) {
     let patterns = $include | split row ','
-    $filtered_content = $filtered_content | try {
-      ^$awk_bin (generate-include-regex $patterns)
-    } catch {
+    # Write content to temp file to avoid pipe buffering issues with try/catch
+    let tmpfile = (mktemp)
+    $filtered_content | save --force $tmpfile
+    let result = (do { ^$awk_bin (generate-include-regex $patterns) $tmpfile } | complete)
+    rm -f $tmpfile
+    if $result.exit_code != 0 {
       print $outdated_awk
+      print $result.stderr
       exit $ECODE.OUTDATED
     }
+    $filtered_content = $result.stdout
   }
 
   if ($exclude | is-not-empty) {
     let patterns = $exclude | split row ','
-    $filtered_content = $filtered_content | try {
-      ^$awk_bin (generate-exclude-regex $patterns)
-    } catch {
+    # Write content to temp file to avoid pipe buffering issues with try/catch
+    let tmpfile = (mktemp)
+    $filtered_content | save --force $tmpfile
+    let result = (do { ^$awk_bin (generate-exclude-regex $patterns) $tmpfile } | complete)
+    rm -f $tmpfile
+    if $result.exit_code != 0 {
       print $outdated_awk
+      print $result.stderr
       exit $ECODE.OUTDATED
     }
+    $filtered_content = $result.stdout
   }
 
   $filtered_content
